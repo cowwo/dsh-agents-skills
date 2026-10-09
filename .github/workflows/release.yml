@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # 需要写权限才能创建 GitHub Release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Install deps
+        run: npm ci || pnpm install --no-frozen-lockfile
+
+      # 1. 发布裸名版 dsh-agents-skills（让别人用短名装），带重试兜底瞬时 404/网络抖动
+      - name: Publish dsh-agents-skills
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: npm publish dsh-agents-skills";
+            if npm publish --access public; then echo 'published'; exit 0; fi
+            echo "Attempt $i failed, retrying in 5s...";
+            sleep 5;
+          done;
+          echo 'All publish attempts failed'; exit 1
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # 2. 临时把包名改成 @cowwo 的 scoped 版再发一次（带重试）
+      - name: Publish @cowwo/dsh-agents-skills
+        run: |
+          npm pkg set name=@cowwo/dsh-agents-skills
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: npm publish @cowwo/dsh-agents-skills";
+            if npm publish --access public; then echo 'published'; exit 0; fi
+            echo "Attempt $i failed, retrying in 5s...";
+            sleep 5;
+          done;
+          echo 'All publish attempts failed'; exit 1
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # 3. 自动创建 GitHub Release 版本页（写进安装命令）
+      - name: Create GitHub Release
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## 安装
+
+          ```sh
+          dsh plugin --profile web add dsh-agents-skills
+          ```
+
+          也可用 scoped 名：`@cowwo/dsh-agents-skills`。
+
+          - 在「设置 → 全局 Agent」里查看并实时编辑 `$DSH_HOME/AGENTS.md`（全局提示词）
+          - 保存为整文件替换：覆盖前旧内容自动备份到同目录的 `AGENTS.md.bak`
+          - 同时暴露 `globalAgent/read`、`globalAgent/write` 两个 Remote 端点，界面与 Agent 共用同一条代码路径
+          EOF
+          gh release create ${GITHUB_REF_NAME} --title "${GITHUB_REF_NAME}" --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

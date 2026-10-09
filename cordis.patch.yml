@@ -1,0 +1,4 @@
+# dsh-agents-skills bundle patch: inserts the plugin into a profile's layer stack.
+- insert:
+    - id: agents-skills
+      name: 'dsh-agents-skills'
