@@ -148,7 +148,7 @@ window.__ModuleLoader__.load({
 					name: 'settings.section',
 					id: 'global-agent',
 					order: 25,
-					label: '全局 Agent'
+					label: 'agent&skill'
 				}, (props) => React.createElement(GlobalAgentPage, { ...props, rpc })));
 			});
 		}
