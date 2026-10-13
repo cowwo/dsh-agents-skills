@@ -49,7 +49,9 @@ test('官方校验器接受本插件的 typert 清单', async () => {
   const { validateTypertManifest } = requireDsh('@deepseek-ai/dsh-typert-loader');
   const manifest = validateTypertManifest('dsh-agents-skills', await loadManifest());
   assert.equal(manifest.package, 'dsh-agents-skills');
-  assert.equal(manifest.invocations.length, 2);
+  // 两个 Service：globalAgent（2 个方法）+ skillsPanel（5 个方法）。
+  assert.equal(manifest.invocations.length, 7);
+  assert.deepEqual(manifest.model.services.map((service) => service.key).sort(), ['globalAgent', 'skillsPanel']);
 });
 
 test('每个参数都带 wire / source / strict codec', async () => {
@@ -69,10 +71,10 @@ test('每个参数都带 wire / source / strict codec', async () => {
 
 test('读写两个方法的参数与结果 schema 都能接受真实报文', async () => {
   const manifest = await loadManifest();
-  const byMethod = new Map(manifest.invocations.map((invocation) => [invocation.method, invocation]));
-  const read = byMethod.get('read');
-  const write = byMethod.get('write');
-  assert.ok(read && write, '清单必须同时声明 read 与 write');
+  const byId = new Map(manifest.invocations.map((invocation) => [invocation.id, invocation]));
+  const read = byId.get('dsh-agents-skills#globalAgent/read');
+  const write = byId.get('dsh-agents-skills#globalAgent/write');
+  assert.ok(read && write, '清单必须同时声明 globalAgent 的 read 与 write');
 
   assert.deepEqual(read.parameters[0].codec.create().parse({}), {});
   assert.deepEqual(write.parameters[0].codec.create().parse({ content: 'x' }), { content: 'x' });
