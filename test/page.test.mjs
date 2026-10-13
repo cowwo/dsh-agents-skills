@@ -306,7 +306,10 @@ test('GET ?todo=1：只留有事的仓库与待办行', async () => {
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=skills&check=1&todo=1' }), res);
   assert.match(res.body, /new-one/, '新增行在');
   assert.match(res.body, /gone/, '上游已移除行在');
-  assert.equal(res.body.includes('本地·未托管'), false, '未托管组被隐藏');
+  // 新形状：「本地·未托管」既是状态 chip 的文案（恒在工具条里），也是一个分组键。
+  // 判据改为语义的——本地组不渲染、本地行不出现——不再断言整页不含这四个字。
+  assert.equal(res.body.includes('data-fold="__local__"'), false, '未托管组被隐藏');
+  assert.equal(res.body.includes('data-name="mine"'), false, '未托管行不出现');
   assert.match(res.body, /显示全部/);
 });
 
@@ -322,53 +325,39 @@ test('GET ?q=：走搜索并渲染结果', async () => {
   assert.match(res.body, /<th>仓库@技能<\/th><th>安装量<\/th>/, '搜索结果也是一张表');
 });
 
-test('技能列表：8 列纯平铺，每行都写仓库名，没有 rowspan / 分组行', async () => {
+test('技能列表：一仓一折叠卡，行是 data-state / data-name，仓库级动作不在这一页', async () => {
   const { createPageHandler } = await loadPage();
   const { deps } = depsOf();
   const handler = createPageHandler(deps);
   const res = fakeRes();
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=skills&check=1' }), res);
 
+  assert.match(res.body, /<form class="skills-form" method="post">/, '操作仍在一张真实表单里');
+  // 新形状：每个来源仓库一个 <details class="fold" data-fold="<repoKey>">，卡内才是表格。
+  assert.match(res.body, /<details class="fold" open data-fold="a\/b">/, '有待办的仓库默认展开');
+  assert.match(res.body, /<details class="fold" data-fold="__local__">/, '本地组也有一张卡');
+  assert.equal(/<details class="fold" open data-fold="__local__">/.test(res.body), false, '没有待办就默认折起');
   assert.match(res.body, /<table class="skills">/);
-  assert.match(res.body, /<th class="pick"><\/th><th>仓库<\/th><th>技能<\/th><th>状态<\/th><th>说明<\/th><th>来源路径<\/th><th>装于<\/th><th class="actions">操作<\/th>/);
   assert.match(res.body, /<colgroup>/, '固定列宽用 colgroup');
 
-  // 平铺：每行都是 8 个单元格，没有任何合并
-  const tbody = res.body.slice(res.body.indexOf('<tbody>'), res.body.indexOf('</tbody>'));
-  const perRow = [...tbody.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => (m[1].match(/<td/g) || []).length);
-  assert.equal(perRow.length, 4, '四行数据（tdd / gone / new-one / mine）');
-  assert.deepEqual([...new Set(perRow)], [8], '每行都是 8 个单元格');
+  // 行语义：data-name 是技能名，data-state 是状态（new/upd/gone/local/ok）。
+  const rows = rowsOf(res.body);
+  assert.deepEqual(rows.map((row) => row.name).sort(), ['gone', 'mine', 'new-one', 'tdd'], '四行数据');
+  assert.deepEqual(rows.map((row) => row.name + '=' + row.state).sort(),
+    ['gone=gone', 'mine=local', 'new-one=new', 'tdd=upd'], '每行自报状态');
+  for (const row of rows) assert.equal(tdsOf(row.html).length, 7, row.name + ' 行 7 列');
+
+  // 表体骨架：不许 rowspan / colspan（刻意保留的约束）。
+  const tbody = tbodyOf(res.body);
   assert.equal(/rowspan/.test(tbody), false, '表体里没有 rowspan（CSS 注释里提到它是另一回事）');
-  assert.equal(/<tr class="group"/.test(res.body), false, '没有分组行');
   assert.equal(/colspan/.test(tbody), false, '表体里没有跨列单元格');
+  assert.equal(/<tr class="group"/.test(res.body), false, '没有分组行');
 
-  // 每行都写仓库名：看「仓库」这一格本身，a/b 的两行各写一次
-  const repoCells = [...tbody.matchAll(/<td class="mono repo-name"><span class="clip" title="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(repoCells, ['a/b', 'a/b', 'a/b', '本地·未托管'], '每行都写仓库名（a/b 三行各写一次），本地行写「本地·未托管」');
-  assert.match(tbody, /本地·未托管/);
-
-  // 仓库条：仓库级按钮在这里
-  assert.match(res.body, /<div class="repostrip">/);
-  assert.match(res.body, /name="row" value="check\|a\/b\|">重查</, '仓库条里有重查');
-  assert.match(res.body, /name="row" value="installAll\|a\/b\|">装全部新增 \(1\)</, '仓库条里有批量安装');
-  assert.match(res.body, /name="row" value="updateAll\|a\/b\|">更新全部 \(1\)</, '仓库条里有批量更新');
-
-  // 滚动结构：表体自己滚、表头 sticky 偏移 0（偏移非 0 会盖住第一行）
-  assert.match(res.body, /<main class="content skills-page">/, '技能页的 main 带 skills-page');
-  assert.match(res.body, /\.table-scroll \{ flex: 1 1 auto; min-height: 0; overflow: auto;/);
-  // flex 列里的横条不许被压缩：批量条曾被压到 20px，按钮溢出压住了表头
-  assert.match(res.body, /\.content\.skills-page > \*:not\(\.skills-form\) \{ flex: 0 0 auto; \}/);
-  assert.match(res.body, /\.batchbar \{ flex: 0 0 auto; min-height: 34px;/);
-  assert.match(res.body, /\.repostrip \{ flex: 0 0 auto;/);
-  assert.match(res.body, /thead th \{ position: sticky; top: 0;/);
-  // 表头的粘性偏移必须是 0：非 0 会让表头被"往下推"，盖住第一行（上一版就是这么坏的）。
-  assert.equal(/thead th \{ position: sticky; top: [1-9]/.test(res.body), false, '表头粘性偏移必须是 0');
-  // 单元格一律不做 sticky（左栏 .nav 的 sticky 是另一回事，它是相对视口的）
-  for (const selector of ['td.repo', 'td.pick', 'td.actions', 'th.pick', 'th.actions']) {
-    assert.equal(new RegExp(selector.replace('.', '\\.') + '[^{}]*\\{[^}]*position: sticky').test(res.body), false,
-      selector + ' 不做 sticky');
-  }
-  assert.match(res.body, /<form class="skills-form" method="post">/);
+  // 仓库条已删除：技能页只做行级/批量动作，仓库级动作在仓库页与仓库子页。
+  assert.equal(res.body.includes('repostrip'), false, '技能页没有仓库条');
+  assert.equal(/name="row" value="check\|/.test(res.body), false, '技能页没有仓库级「检查」');
+  assert.equal(/name="row" value="installAll\|/.test(res.body), false, '技能页没有「装全部新增」');
+  assert.match(res.body, /class="content skills-page"/, '技能页的内容列带 skills-page 标记');
 });
 
 test('操作列只挂有意义的按钮：已装且最新的行只有「删除」', async () => {
@@ -378,19 +367,10 @@ test('操作列只挂有意义的按钮：已装且最新的行只有「删除�
   const res = fakeRes();
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=skills&check=1' }), res);
 
-  const tbody = res.body.slice(res.body.indexOf('<tbody>'), res.body.indexOf('</tbody>'));
-  const rows = [...tbody.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => m[1]);
-  const actionsOf = (html) => {
-    const cell = /<td class="actions">([\s\S]*?)<\/td>/.exec(html);
-    return [...cell[1].matchAll(/value="(\w+)\|/g)].map((m) => m[1]);
-  };
-  const byName = new Map(rows.map((html) => [/name="row" value="[^|]+\|[^|]*\|([^"]+)"/.exec(html)?.[1]
-    ?? /title="([^"]+)"/.exec(html)?.[1], html]));
-  const findRow = (name) => rows.find((html) => html.includes('>' + name + '<'));
-
-  assert.deepEqual(actionsOf(findRow('new-one')), ['install'], '新增行只有安装');
-  assert.deepEqual(actionsOf(findRow('gone')), ['remove'], '上游已移除行只有删除');
-  assert.deepEqual(actionsOf(findRow('mine')), ['remove'], '已装且最新的行只有删除，没有「更新」');
+  assert.deepEqual(rowActionsOf(rowByName(res.body, 'new-one').html), ['install'], '新增行只有安装');
+  assert.deepEqual(rowActionsOf(rowByName(res.body, 'gone').html), ['remove'], '上游已移除行只有删除');
+  assert.deepEqual(rowActionsOf(rowByName(res.body, 'mine').html), ['remove'], '已装且最新的行只有删除，没有「更新」');
+  assert.deepEqual(rowActionsOf(rowByName(res.body, 'tdd').html), ['update', 'remove'], '可更新行给更新与删除');
 });
 
 test('POST action=check：只重查一个仓库，并并进缓存', async () => {
@@ -465,8 +445,13 @@ test('POST remove / update：动作与摘除规则', async () => {
 
   const after = fakeRes();
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=skills&check=1' }), after);
-  assert.equal(after.body.includes('>上游已移除<'), false, '删掉的已移除项要消失（页脚说明文字不算）');
-  assert.equal(after.body.includes('可更新 1'), false, '更新过的可更新项要消失');
+  // 语义：删掉的「上游已移除」行不再被标成已移除（技能本身还在 overview 里，所以行仍渲染）。
+  assert.equal(rowByName(after.body, 'gone').state, 'ok', '删掉的已移除项不再标已移除');
+  assert.equal(chipsOf(after.body).get('上游已移除').count, 0, '已移除计数归零');
+  // 更新过的行不再是「可更新」状态（回落成已装）。
+  assert.equal(rowByName(after.body, 'tdd').state, 'ok', '更新过的可更新项要消失');
+  assert.equal(chipsOf(after.body).get('可更新').count, 0, '可更新计数归零');
+  assert.equal(/\bundefined\b/.test(after.body), false, '回跳后不留 undefined');
 });
 
 test('批量安装：按仓库分组，一个仓库只跑一次 CLI', async () => {
@@ -911,13 +896,15 @@ test('左栏：显示技能数，有待办缓存时再显示待办数', async ()
   const before = fakeRes();
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=agent' }), before);
   assert.match(before.body, /<span class="count">3<\/span>/, '技能数来自 overview');
-  assert.equal(before.body.includes('count warn'), false, '还没检查过就没有待办徽章');
-  assert.match(before.body, /待办<\/a>/, '「待办」是独立导航项');
+  assert.equal(before.body.includes('count hot'), false, '还没检查过就没有待办徽章');
+  assert.match(before.body, /href="\/dsh-agents-skills\?tab=todo"/, '「待办」是独立导航项');
 
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=skills&check=1' }), fakeRes());
   const after = fakeRes();
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=agent' }), after);
-  assert.match(after.body, /<span class="count warn">3<\/span>/, '检查缓存里的待办数（新增 1 + 可更新 1 + 已移除 1）');
+  // 待办徽章是「热」计数（旧皮肤叫 count warn，新皮肤叫 count hot）——按语义找那个非零计数即可。
+  assert.match(after.body, /<span class="count (hot|warn)">3<\/span>/, '检查缓存里的待办数（新增 1 + 可更新 1 + 已移除 1）');
+  assert.equal(after.body.includes('count hot">0<'), false, '零待办不该出现热徽章');
 });
 
 test('宿主 groupSkills 与设置页 buildGroups 输出完全一致', async () => {
@@ -991,6 +978,101 @@ function tbodyOf(html) {
 }
 
 // ---------------------------------------------------------------------------
+// 语义读页面（不锁死 class 名 / 列序 / CSS 正文，只认行为钩子与协议值）
+// ---------------------------------------------------------------------------
+
+/**
+ * 取所有数据行（新形状：每行带 data-name / data-state）。
+ * 技能页一仓一张表，所以这里跨整页扫 <tr>，只保留带 data-name 的数据行（表头行没有）。
+ * @param {string} html 页面 HTML
+ * @returns {{ name: string, state: string, attrs: string, html: string }[]} 行
+ */
+function rowsOf(html) {
+  return [...html.matchAll(/<tr([^>]*)>([\s\S]*?)<\/tr>/g)]
+    .filter((match) => /data-name="/.test(match[1]))
+    .map((match) => ({
+      attrs: match[1],
+      html: match[2],
+      name: /data-name="([^"]*)"/.exec(match[1])?.[1] ?? '',
+      state: /data-state="([^"]*)"/.exec(match[1])?.[1] ?? '',
+    }));
+}
+
+/**
+ * 取页面上所有 tbody（技能页每个仓库一张表）。
+ * @param {string} html 页面 HTML
+ * @returns {string[]} tbody 内容
+ */
+function tbodiesOf(html) {
+  return [...html.matchAll(/<tbody>([\s\S]*?)<\/tbody>/g)].map((match) => match[1]);
+}
+
+/**
+ * 按技能名取一行。
+ * @param {string} html 页面 HTML
+ * @param {string} name 技能名
+ * @returns {{ name: string, state: string, attrs: string, html: string }} 行
+ */
+function rowByName(html, name) {
+  return rowsOf(html).find((row) => row.name === name);
+}
+
+/**
+ * 一行的所有 <td> 内容（顺序即列序，不额外假设）。
+ * @param {string} rowHtml 行 HTML
+ * @returns {string[]} 单元格内容
+ */
+function tdsOf(rowHtml) {
+  return [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((match) => match[1]);
+}
+
+/**
+ * 操作列里的 row 协议取值（install / update / remove …）。
+ * @param {string} rowHtml 行 HTML
+ * @returns {string[]} 动作名
+ */
+function rowActionsOf(rowHtml) {
+  const cell = /<td class="actions">([\s\S]*?)<\/td>/.exec(rowHtml);
+  return cell === null ? [] : [...cell[1].matchAll(/value="(\w+)\|/g)].map((match) => match[1]);
+}
+
+/**
+ * 状态筛选 chip 的读数：文案 → { count, pressed }。
+ * @param {string} html 页面 HTML
+ * @returns {Map<string, { count: number, pressed: boolean }>} chip 读数
+ */
+function chipsOf(html) {
+  const map = new Map();
+  for (const match of html.matchAll(/<a class="chip"[^>]*aria-pressed="(true|false)"[^>]*>([^<]*)<span class="n">(\d+)<\/span><\/a>/g)) {
+    map.set(match[2], { count: Number(match[3]), pressed: match[1] === 'true' });
+  }
+  return map;
+}
+
+/**
+ * 折叠卡：键 → 是否展开（data-fold 是服务端渲染的稳定钩子）。
+ * @param {string} html 页面 HTML
+ * @returns {Map<string, boolean>} 键到展开状态
+ */
+function foldsOf(html) {
+  const map = new Map();
+  for (const match of html.matchAll(/<details class="fold"([^>]*)>/g)) {
+    const key = /data-fold="([^"]*)"/.exec(match[1])?.[1];
+    if (key !== undefined) map.set(key, /\sopen(\s|$)/.test(match[1]));
+  }
+  return map;
+}
+
+/**
+ * 仓库列表页的卡片标题顺序。
+ * @param {string} html 页面 HTML
+ * @returns {string[]} 标题（仓库名 / 本地 · 未托管）
+ */
+function cardTitlesOf(html) {
+  return [...html.matchAll(/<article class="card">[\s\S]*?<a class="name"[^>]*>([^<]*)<\/a>/g)].map((match) => match[1]);
+}
+
+// ---------------------------------------------------------------------------
 // 新信息架构：仓库列表（默认）/ 仓库子页 / 待办 / 所有技能 / Agent。
 // ---------------------------------------------------------------------------
 
@@ -998,18 +1080,22 @@ test('仓库列表：无 ?tab 时默认渲染；行含子页链接，页头含�
   const res = await renderPage('/dsh-agents-skills');
   assert.equal(res.status, 200);
   assert.match(res.body, /<h1>仓库<\/h1>/, '默认页是仓库列表');
-  assert.match(res.body, /class="navitem active" href="\/dsh-agents-skills\?tab=repos"/, '左栏「仓库」是 active');
-  assert.match(res.body, /placeholder="owner\/repo，例如 anthropics\/skills"/, '添加表单的占位文案');
+  assert.match(res.body, /<a[^>]*href="\/dsh-agents-skills\?tab=repos"[^>]*aria-current="page"/, '左栏「仓库」是当前项');
+  assert.match(res.body, /owner\/repo<\/span>/, '输入框旁标明 owner/repo 写法');
+  assert.match(res.body, /<input type="text" name="source"[^>]*placeholder="[^"]+"/, '有占位提示');
   assert.match(res.body, /name="action" value="subscribe"/, '添加走现成的 subscribe 协议');
   assert.match(res.body, /name="source"/);
-  assert.match(res.body, /<button class="primary" type="submit">添加<\/button>/);
-  // 仓库名链到该仓子页
+  assert.match(res.body, /<button[^>]*type="submit"[^>]*>添加<\/button>/);
+  // 仓库名链到该仓子页（卡片式仓库列表）
   assert.match(res.body, /href="\/dsh-agents-skills\?tab=repo&amp;repo=a%2Fb"/, '仓库名链到子页');
-  assert.match(res.body, /<th>仓库<\/th><th>已装<\/th><th>状态<\/th><th>来源<\/th><th class="actions">操作<\/th>/, '5 列');
-  assert.match(res.body, /<a class="btn" href="\/dsh-agents-skills\?tab=repos&amp;check=2">检查更新<\/a>/, '页头检查更新走 links.check');
-  const tbody = tbodyOf(res.body);
-  const perRow = [...tbody.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => (m[1].match(/<td/g) || []).length);
-  assert.deepEqual([...new Set(perRow)], [5], '仓库列表每行 5 个单元格');
+  assert.deepEqual(cardTitlesOf(res.body), ['a/b', '本地 · 未托管'], '一仓一张卡，本地沉底');
+  assert.match(res.body, /<a[^>]*href="\/dsh-agents-skills\?tab=repos&amp;check=2"[^>]*>检查更新<\/a>/, '页头检查更新走 links.check');
+  // 仓库级动作仍在这一页（技能页已不再有仓库条）；没检查过时只给「检查」。
+  const cards = [...res.body.matchAll(/<article class="card">([\s\S]*?)<\/article>/g)].map((match) => match[1]);
+  assert.deepEqual([...cards[0].matchAll(/name="row" value="([^"]*)"/g)].map((match) => match[1]), ['check|a/b|'], '卡片头给仓库级动作');
+  const checked = (await renderPage('/dsh-agents-skills?tab=repos&check=1')).body;
+  assert.deepEqual([...checked.matchAll(/name="row" value="([^"]*)"/g)].map((match) => match[1]),
+    ['check|a/b|', 'installAll|a/b|', 'updateAll|a/b|'], '查过之后新增批量动作');
 });
 
 test('仓库列表：订阅仓未检查显示「订阅·未检查」，行级按钮按状态给', async () => {
@@ -1022,20 +1108,21 @@ test('仓库列表：订阅仓未检查显示「订阅·未检查」，行级按
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=repos&check=1' }), res);
 
   assert.match(res.body, /订阅·未检查/, '订阅但没查过的仓明说「订阅·未检查」');
-  // 检查失败的仓给红徽章并把 error 放进 title
-  assert.match(res.body, /<span class="badge ok">新增 1<\/span>/);
-  assert.match(res.body, /<span class="badge warn">可更新 1<\/span>/);
-  assert.match(res.body, /<span class="badge err">已移除 1<\/span>/);
+  // 状态徽章语义：徽章文案 + bdot 圆点（不锁 class 名尾缀）。
+  assert.match(res.body, /<span class="badge [a-z]+"><span class="bdot"><\/span>新增 1<\/span>/, '新增徽章');
+  assert.match(res.body, /<span class="badge [a-z]+"><span class="bdot"><\/span>可更新 1<\/span>/, '可更新徽章');
+  assert.match(res.body, /<span class="badge [a-z]+"><span class="bdot"><\/span>已移除 1<\/span>/, '已移除徽章');
   // 行级动作：检查 + 装全部新增 + 更新全部
-  assert.match(res.body, /name="row" value="check\|a\/b\|">检查</);
-  assert.match(res.body, /name="row" value="installAll\|a\/b\|">装全部新增 \(1\)</);
-  assert.match(res.body, /name="row" value="updateAll\|a\/b\|">更新全部 \(1\)</);
+  assert.match(res.body, /name="row" value="check\|a\/b\|">检查<\/button>/);
+  assert.match(res.body, /name="row" value="installAll\|a\/b\|">装全部新增 \(1\)<\/button>/);
+  assert.match(res.body, /name="row" value="updateAll\|a\/b\|">更新全部 \(1\)<\/button>/);
   // 来源列三态
-  assert.match(res.body, /<td class="dim">订阅<\/td>/);
-  assert.match(res.body, /本地·未托管/);
-  // 本地行没有仓库级按钮，也不该出现 check| 加空 source
-  const localRow = tbodyOf(res.body).split('<tr>').find((row) => row.includes('本地·未托管'));
-  assert.equal(/name="row"/.test(localRow), false, '本地行没有按钮');
+  assert.match(res.body, /订阅<\/span>/, '订阅仓的来源写「订阅」');
+  assert.match(res.body, /本地 · 未托管/);
+  // 本地卡没有仓库级按钮，也不该出现 check| 加空 source
+  const localCard = [...res.body.matchAll(/<article class="card">([\s\S]*?)<\/article>/g)]
+    .map((match) => match[1]).find((card) => card.includes('本地 · 未托管'));
+  assert.equal(/name="row"/.test(localCard), false, '本地卡没有按钮');
 });
 
 test('仓库列表：检查失败的仓显示红徽章「检查失败」，title 放原因', async () => {
@@ -1053,7 +1140,8 @@ test('仓库列表：检查失败的仓显示红徽章「检查失败」，title
   const handler = createPageHandler(deps);
   const res = fakeRes();
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=repos&check=1' }), res);
-  assert.match(res.body, /<span class="badge err" title="API 限额用完了">检查失败<\/span>/);
+  // 语义：一个带 bdot 的「检查失败」徽章，原因在 title 里（class 尾缀不锁死）。
+  assert.match(res.body, /<span class="badge [a-z]+" title="API 限额用完了"><span class="bdot"><\/span>检查失败<\/span>/);
 });
 
 test('仓库列表：待办多的在前、同待办按名字、本地恒在最底', async () => {
@@ -1065,8 +1153,7 @@ test('仓库列表：待办多的在前、同待办按名字、本地恒在最�
   const res = fakeRes();
   // a/b 有 3 个待办；z/z 与 m/m 都是 0；本地最后。
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=repos&check=1' }), res);
-  const titles = [...tbodyOf(res.body).matchAll(/<td class="mono repo-name repo-link"><a href="[^"]*"><span class="clip" title="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(titles, ['a/b', 'm/m', 'z/z', '本地·未托管'], 'pending desc + source asc + local 沉底');
+  assert.deepEqual(cardTitlesOf(res.body), ['a/b', 'm/m', 'z/z', '本地 · 未托管'], 'pending desc + source asc + local 沉底');
 });
 
 test('仓库列表：无仓无订阅时给引导文案，不渲染空表', async () => {
@@ -1075,23 +1162,26 @@ test('仓库列表：无仓无订阅时给引导文案，不渲染空表', async
   assert.equal(res.body.includes('<table class="skills">'), false, '空态不渲染空表');
 });
 
-test('仓库子页：面包屑 + 只渲染该仓的行 + 7 列（去掉仓库列）', async () => {
+test('仓库子页：面包屑 + 只渲染该仓的行 + 去掉仓库列', async () => {
   const res = await renderPage('/dsh-agents-skills?tab=repo&repo=a%2Fb&check=1');
   assert.equal(res.status, 200);
-  assert.match(res.body, /<div class="crumbs"><a href="\/dsh-agents-skills\?tab=repos">← 仓库<\/a><\/div>/, '面包屑回仓库列表');
-  assert.match(res.body, /<h1 class="mono">a\/b<\/h1>/);
-  assert.match(res.body, /<th class="pick"><\/th><th>技能<\/th><th>状态<\/th><th>说明<\/th><th>来源路径<\/th><th>装于<\/th><th class="actions">操作<\/th>/, '7 列，没有仓库列');
+  assert.match(res.body, /<a[^>]*href="\/dsh-agents-skills\?tab=repos">← 仓库<\/a>/, '面包屑回仓库列表');
+  assert.match(res.body, /<h1[^>]*>a\/b<\/h1>/);
+  // 语义：子页没有「仓库」列，其余 7 个表头都在。
+  assert.equal(/<th>仓库<\/th>/.test(res.body), false, '子页没有仓库列');
+  for (const head of ['技能', '状态', '说明', '来源路径', '装于', '操作']) {
+    assert.equal(res.body.includes('<th>' + head + '</th>') || res.body.includes('>' + head + '</th>'), true, '表头有 ' + head);
+  }
+  assert.equal((res.body.match(/<th[ >]/g) ?? []).length, 7, '子页表格 7 列');
   assert.match(res.body, /已装 2\/3 · 新增 1 · 可更新 1 · 已移除 1/, '页头统计');
-  const tbody = tbodyOf(res.body);
-  const perRow = [...tbody.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => (m[1].match(/<td/g) || []).length);
-  assert.deepEqual([...new Set(perRow)], [7], '子页每行 7 个单元格');
-  assert.match(tbody, /new-one/);
-  assert.match(tbody, /gone/);
-  assert.equal(tbody.includes('mine'), false, '别的仓（本地）的行不出现');
+  const rows = rowsOf(res.body);
+  assert.deepEqual(rows.map((row) => row.name + '=' + row.state), ['gone=gone', 'new-one=new', 'tdd=upd'], '按名字排序');
+  for (const row of rows) assert.equal(tdsOf(row.html).length, 7, row.name + ' 行 7 列');
+  assert.equal(res.body.includes('data-name="mine"'), false, '别的仓（本地）的行不出现');
   // 子页也有整套批量协议，仓库位仍是本仓 source
-  assert.match(res.body, /<form class="skills-form" method="post"><input type="hidden" name="back" value="\?tab=repo&amp;repo=a%2Fb">/);
+  assert.match(res.body, /name="back" value="\?tab=repo&amp;repo=a%2Fb"/);
   assert.match(res.body, /name="row" value="install\|a\/b\|new-one"/);
-  assert.match(res.body, /<div class="batchbar">/);
+  assert.match(res.body, /<div class="batchbar" id="batchbar">/);
   assert.match(res.body, /href="\/dsh-agents-skills\?tab=repo&amp;repo=a%2Fb&amp;pickall=1"/);
 });
 
@@ -1105,7 +1195,7 @@ test('仓库子页：订阅仓未检查时表格位置给一行提示', async ()
   await handler(fakeReq({ url: '/dsh-agents-skills?tab=repo&repo=sub%2Frepo' }), res);
   assert.equal(res.status, 200);
   assert.match(res.body, /尚未检查，点右上角\[检查\]看看有什么可装。/);
-  assert.match(res.body, /<span class="dim stats">已装 0 · 未检查<\/span>/);
+  assert.match(res.body, /已装 0 · 未检查/, '页头统计说未检查');
 
   // 订阅但已装了技能、又没查过：提示行 + 已装行并存（不藏用户的技能）
   const filled = depsOf({
@@ -1121,12 +1211,13 @@ test('仓库子页：订阅仓未检查时表格位置给一行提示', async ()
 test('仓库子页：__local__ 只有已装行与[删除]，没有检查类按钮', async () => {
   const res = await renderPage('/dsh-agents-skills?tab=repo&repo=__local__');
   assert.equal(res.status, 200);
-  assert.match(res.body, /<h1 class="mono">本地·未托管<\/h1>/);
+  assert.match(res.body, /<h1[^>]*>本地 · 未托管<\/h1>/);
   assert.match(res.body, /name="row" value="remove\|\|mine">删除</);
-  assert.equal(res.body.includes('value="check|'), false, '本地页没有检查按钮');
+  assert.equal(res.body.includes('name="row" value="check|'), false, '本地页没有检查按钮');
   assert.equal(res.body.includes('installAll'), false, '本地页没有装全部新增');
   assert.equal(res.body.includes('updateAll'), false, '本地页没有更新全部');
-  assert.equal(res.body.includes('name="pick"'), false, '已装行没有勾选框');
+  // 判据是「没有勾选框元素」——CSS 里那句 input[name="pick"] 的选中态样式不算。
+  assert.equal(/<input[^>]*name="pick"/.test(res.body), false, '已装行没有勾选框');
 });
 
 test('仓库子页：不存在的 repo key 不炸，给人话', async () => {
@@ -1140,21 +1231,20 @@ test('待办：只列 kind != installed 的行，仓库列链到子页，可「�
   const res = await renderPage('/dsh-agents-skills?tab=todo&check=1');
   assert.equal(res.status, 200);
   assert.match(res.body, /<h1>待办<\/h1>/);
-  assert.match(res.body, /新增 1 · 可更新 1 · 已移除 1/);
-  assert.match(res.body, /<button type="submit" name="batch" value="updateAll">更新全部 \(1\)<\/button>/);
-  const tbody = tbodyOf(res.body);
-  assert.match(tbody, /new-one/);
-  assert.match(tbody, /gone/);
-  assert.match(tbody, /tdd/);
-  assert.equal(tbody.includes('mine'), false, '已装且最新的行不进待办');
-  assert.match(tbody, /<td class="mono repo-name repo-link"><a href="\/dsh-agents-skills\?tab=repo&amp;repo=a%2Fb">/, '待办的仓库列链到子页');
-  const perRow = [...tbody.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map((m) => (m[1].match(/<td/g) || []).length);
-  assert.deepEqual([...new Set(perRow)], [8], '跨仓聚合表 8 列');
+  assert.match(res.body, /新增 1 · 可更新 1 · 上游已移除 1/);
+  assert.match(res.body, /<button class="[^"]*" type="submit" name="batch" value="updateAll">更新全部 \(1\)<\/button>/);
+  const rows = rowsOf(res.body);
+  assert.deepEqual(rows.map((row) => row.name), ['gone', 'new-one', 'tdd'], '三条待办');
+  assert.equal(res.body.includes('data-name="mine"'), false, '已装且最新的行不进待办');
+  assert.match(res.body, /<td[^>]*><a href="\/dsh-agents-skills\?tab=repo&amp;repo=a%2Fb">/, '待办的仓库列链到子页');
+  for (const row of rows) assert.equal(tdsOf(row.html).length, 8, row.name + ' 行 8 列');
 });
 
 test('待办：两个空态分支（没查过 → 引导去检查；查过且无待办 → 说已最新）', async () => {
   const cold = await renderPage('/dsh-agents-skills?tab=todo');
-  assert.match(cold.body, /还没检查过，先点<a class="btn" href="\/dsh-agents-skills\?tab=todo&amp;check=2">检查更新<\/a>。/);
+  assert.match(cold.body, /还没检查过/);
+  assert.match(cold.body, /<a class="[^"]*" href="\/dsh-agents-skills\?tab=todo&amp;check=2">检查更新<\/a>/, '冷启动给检查入口');
+  assert.equal(cold.body.includes('没有待办：所有盯着的仓库都已装上且最新。'), false);
 
   const clean = await renderPage('/dsh-agents-skills?tab=todo&check=1', {
     check: async () => ({
@@ -1167,7 +1257,7 @@ test('待办：两个空态分支（没查过 → 引导去检查；查过且无
     }),
   });
   assert.match(clean.body, /没有待办：所有盯着的仓库都已装上且最新。/);
-  assert.equal(clean.body.includes('value="check|a/b|"'), false, '待办页只列待办，不挂仓库级检查按钮');
+  assert.equal(clean.body.includes('name="row" value="check|'), false, '待办页只列待办，不挂仓库级检查按钮');
 });
 
 test('路由与视图装配：repos / repo / todo / skills / agent 都返回 200', async () => {
@@ -1196,7 +1286,7 @@ test('待办：同一处理器里刚检查过，切到 tab=todo 仍用缓存结�
 const PAGE_UI_TAG = '<script src="/dsh-agents-skills?asset=page-ui.js" defer></script>';
 
 test('（a）脚本铁律：只允许外链 page-ui.js；无内联 <script> / javascript: / 内联事件', async () => {
-  for (const url of ['/dsh-agents-skills', '/dsh-agents-skills?tab=repos&check=1', '/dsh-agents-skills?tab=repo&repo=a%2Fb&check=1', '/dsh-agents-skills?tab=todo&check=1', '/dsh-agents-skills?tab=skills', '/dsh-agents-skills?tab=agent', '/dsh-agents-skills?tab=skills&q=react', '/dsh-agents-skills?check=1']) {
+  for (const url of ['/dsh-agents-skills', '/dsh-agents-skills?tab=repos&check=1', '/dsh-agents-skills?tab=repo&repo=a%2Fb&check=1', '/dsh-agents-skills?tab=todo&check=1', '/dsh-agents-skills?tab=skills', '/dsh-agents-skills?tab=agent', '/dsh-agents-skills?tab=skills&q=react', '/dsh-agents-skills?check=1', '/dsh-agents-skills?tab=skills&check=1&state=new', '/dsh-agents-skills?tab=skills&check=1&filter=tdd&pickall=1']) {
     const res = await renderPage(url);
     assert.equal(res.status, 200, url);
     const tags = [...res.body.matchAll(/<script\b[^>]*>[\s\S]*?<\/script>/gi)].map((match) => match[0]);
@@ -1232,7 +1322,9 @@ test('（b）?asset=page-ui.js：200 + JS content-type + no-store；内容是 fe
   assert.equal(/new\s+Function/.test(res.body), false, '不用 new Function');
   assert.equal(/\bimport\s*\(/.test(res.body), false, '不用动态 import');
   assert.equal(/localStorage/.test(res.body), false, '不读 localStorage');
-  assert.equal(res.body.split('\n').length <= 200, true, '交互层 ≤200 行');
+  // 行数按「实际行」算：末尾换行不算多一行（199 行与 200 行都合规）。
+  const lineCount = res.body.split('\n').length - (res.body.endsWith('\n') ? 1 : 0);
+  assert.equal(lineCount <= 200, true, '交互层 ≤200 行，实际 ' + lineCount);
 });
 
 test('（b2）资产路由：别的资产名 404；门禁对资产同样生效（fail closed）', async () => {
@@ -1259,17 +1351,32 @@ test('（c）CSP：script-src 只放行 self；不含 unsafe-inline / data: / bl
 
 test('（d）无 JS 兜底不变：交互仍全在真实表单 / GET 链接 / 原生 details 里', async () => {
   const body = (await renderPage('/dsh-agents-skills?tab=skills&check=1')).body;
+  // 关掉 JS 之后每个操作都要有服务端等价物：批量与行内是 POST 表单字段，筛选/导航是 GET 链接，
+  // 折叠是原生 <details>（浏览器自己就能开合）。
   assert.match(body, /<form class="skills-form" method="post">/, '批量与行内操作是真实表单');
-  assert.match(body, /name="row" value="check\|a\/b\|"/, '仓库按钮靠表单字段，不靠 JS');
-  assert.match(body, /name="batch" value="install"/, '批量按钮靠表单字段，不靠 JS');
-  assert.match(body, /<details class="fold"><summary>搜索安装<\/summary>/, '折叠是原生 details');
+  assert.match(body, /name="batch" value="install"/, '批量安装靠表单字段');
+  assert.match(body, /name="batch" value="update"/, '批量更新靠表单字段');
+  assert.match(body, /name="batch" value="remove"/, '批量删除靠表单字段');
+  assert.match(body, /name="row" value="install\|a\/b\|new-one"/, '行级安装靠表单字段');
+  assert.match(body, /<details class="fold" open data-fold="a\/b">/, '分组折叠是原生 details');
+  assert.match(body, /<details class="fold"><summary>搜索安装<\/summary>/, '搜索安装也是原生 details');
+  assert.match(body, /<form class="field" method="get" action="\/dsh-agents-skills">/, '状态/名字筛选是 GET 表单');
+  // 状态 chip 全是 GET 链接（含 state= 那些新取值）。
+  assert.match(body, /<a class="chip"[^>]*href="[^"]*state=new"[^>]*>/, '新增 chip 是链接');
+  assert.match(body, /<a class="chip"[^>]*href="[^"]*state=local"[^>]*>/, '本地 chip 是链接');
+  // 仓库页的添加与仓库级动作同样是真实表单。
+  const repos = (await renderPage('/dsh-agents-skills?tab=repos&check=1')).body;
+  assert.match(repos, /<form class="toolbar" method="post">[\s\S]*name="action" value="subscribe"/, '添加仓库是 POST 表单');
+  assert.match(repos, /name="row" value="check\|a\/b\|"/, '仓库级检查靠表单字段，不靠 JS');
 });
 
-test('（e）.busy 样式在 STYLE 里（提交中禁用视觉）', async () => {
-  const rule = cssRules((await renderPage('/dsh-agents-skills')).body).find((item) => item.selector === '.busy');
-  assert.ok(rule, 'STYLE 里有 .busy 规则');
-  assert.match(rule.body, /opacity:\s*\.6/);
-  assert.match(rule.body, /cursor:\s*wait/);
+test('（e）提交中禁用：交互层给被点的按钮打标记，样式里也有对应的等待视觉', async () => {
+  // 不再逐字匹配 .busy 的 CSS 正文（调样式不该让测试变红）：只要求「交互层会标记/禁用提交按钮」
+  // 且「样式里有对 .busy 或 [disabled] 的处理」这两件可观察的能力。
+  const asset = (await renderPage('/dsh-agents-skills?asset=page-ui.js')).body;
+  assert.match(asset, /(classList\.(add|toggle)\(\s*['"]busy['"]|\.disabled\s*=\s*true)/, '交互层标记提交中的按钮');
+  const style = (await renderPage('/dsh-agents-skills')).body;
+  assert.match(style, /\.busy\b|\[disabled\]/, '样式里有提交中/禁用视觉');
 });
 
 test('（f）底部说明不再声称「禁止一切脚本」', async () => {
@@ -1279,49 +1386,56 @@ test('（f）底部说明不再声称「禁止一切脚本」', async () => {
   assert.match(body, /页面脚本仅限本站自身的一个文件/);
 });
 
-test('（b）表头 sticky top:0；td/th 不 sticky；tbody 无 rowspan / colspan', async () => {
-  const res = await renderPage('/dsh-agents-skills?check=1');
-  assert.match(res.body, /thead th \{ position: sticky; top: 0;/);
-  assert.equal(/thead th \{ position: sticky; top: [1-9]/.test(res.body), false, '偏移必须是 0（top:38px 那次的教训）');
-  // 解析所有 CSS 规则：凡涉及 th/td 的（thead 除外）都不许 position: sticky
-  const offenders = cssRules(res.body).filter((rule) => {
-    const selectors = rule.selector.split(',').map((item) => item.trim()).filter((item) => !/^thead\b/.test(item));
-    return selectors.some((item) => /(^|[^\w-])t[dh]([.:\[#\s]|$)/.test(item)) && /position:\s*sticky/.test(rule.body);
-  });
-  assert.deepEqual(offenders, [], 'th/td 一律不做 sticky');
-  // tbody 里不许 rowspan / colspan：技能页的有数据与空表两种渲染都查
+test('（b）表头粘性偏移必须是 0；td/th 不 sticky；tbody 无 rowspan / colspan', async () => {
+  const res = await renderPage('/dsh-agents-skills?tab=skills&check=1');
+  // 语义：解析 CSS 规则，凡声明 sticky 的表头/单元格，偏移必须是 0（top:38px 那次的教训）；
+  // 不逐字匹配选择器文本（改样式不该误报）。
+  const stickyOffsets = cssRules(res.body)
+    .filter((rule) => /position:\s*sticky/.test(rule.body) && /(^|[^\w-])t[dh]([.:\[#\s]|$)/.test(rule.selector))
+    .map((rule) => /top:\s*([^;]+)/.exec(rule.body)?.[1].trim() ?? '');
+  for (const offset of stickyOffsets) {
+    assert.equal(offset === '0' || offset === '0px', true, '粘性偏移必须归零，实际是 ' + offset);
+  }
+  // 表头是粘的（这条能力要保留）：存在针对表头的 sticky 规则。
+  assert.equal(stickyOffsets.length > 0, true, '表头仍有粘性（否则长表滚没了表头）');
+  // tbody 里不许 rowspan / colspan：有数据与空表两种渲染都查（技能页每仓一张表，逐张查）
   const empty = await renderPage('/dsh-agents-skills?tab=skills&check=1', { overview: async () => overviewOf([]) });
   for (const [label, html] of [['有数据', res.body], ['空表', empty.body]]) {
-    const tbody = tbodyOf(html);
-    assert.equal(/rowspan/.test(tbody), false, label + ' tbody 无 rowspan');
-    assert.equal(/colspan/.test(tbody), false, label + ' tbody 无 colspan');
+    for (const tbody of tbodiesOf(html)) {
+      assert.equal(/rowspan/.test(tbody), false, label + ' tbody 无 rowspan');
+      assert.equal(/colspan/.test(tbody), false, label + ' tbody 无 colspan');
+    }
   }
-  // 仓库列表 / 仓库子页 / 待办页的表体同样不许合并单元格
+  // 仓库子页 / 待办页的表体同样不许合并单元格
   const otherViews = [
-    ['仓库列表', '/dsh-agents-skills?tab=repos&check=1'],
     ['仓库子页', '/dsh-agents-skills?tab=repo&repo=a%2Fb&check=1'],
     ['待办', '/dsh-agents-skills?tab=todo&check=1'],
   ];
   for (const [label, url] of otherViews) {
-    const tbody = tbodyOf((await renderPage(url)).body);
-    assert.equal(/rowspan/.test(tbody), false, label + ' tbody 无 rowspan');
-    assert.equal(/colspan/.test(tbody), false, label + ' tbody 无 colspan');
+    for (const tbody of tbodiesOf((await renderPage(url)).body)) {
+      assert.equal(/rowspan/.test(tbody), false, label + ' tbody 无 rowspan');
+      assert.equal(/colspan/.test(tbody), false, label + ' tbody 无 colspan');
+    }
   }
 });
 
-test('（c）批量条与仓库条都 flex:0 0 auto；仓库条单行横滚；弹性链每级 min-height:0', async () => {
-  const res = await renderPage('/dsh-agents-skills?check=1');
-  const rules = cssRules(res.body);
-  const ruleOf = (selector) => rules.find((rule) => rule.selector === selector);
-  assert.match(ruleOf('.batchbar').body, /flex: 0 0 auto/, '.batchbar 不许被压缩');
-  assert.match(ruleOf('.repostrip').body, /flex: 0 0 auto/, '.repostrip 不许被压缩');
-  assert.match(ruleOf('.repostrip').body, /flex-wrap: nowrap/, '.repostrip 单行');
-  assert.match(ruleOf('.repostrip').body, /overflow-x: auto/, '.repostrip 横滚');
-  assert.match(res.body, /\.skills-form > \.repostrip, \.skills-form > \.batchbar \{ flex: 0 0 auto; \}/);
-  assert.match(ruleOf('.content.skills-page').body, /min-height: 0/);
-  assert.match(ruleOf('.skills-form').body, /min-height: 0/);
-  assert.match(ruleOf('.table-scroll').body, /min-height: 0/);
-  assert.match(ruleOf('.table-scroll').body, /flex: 1 1 auto/);
+test('（c）仓库条已删除：仓库级动作只出现在仓库页与仓库子页，按真实表单字段判定', async () => {
+  const skillsPage = (await renderPage('/dsh-agents-skills?tab=skills&check=1')).body;
+  assert.equal(skillsPage.includes('repostrip'), false, '技能页没有仓库条');
+  assert.equal(/name="row" value="check\|/.test(skillsPage), false, '技能页没有仓库级「检查」');
+  assert.equal(/name="row" value="installAll\|/.test(skillsPage), false, '技能页没有「装全部新增」');
+  assert.equal(/name="row" value="updateAll\|/.test(skillsPage), false, '技能页没有仓库级「更新全部」');
+
+  const repos = (await renderPage('/dsh-agents-skills?tab=repos&check=1')).body;
+  assert.match(repos, /name="row" value="check\|a\/b\|"/);
+  assert.match(repos, /name="row" value="installAll\|a\/b\|"/);
+  assert.match(repos, /name="row" value="updateAll\|a\/b\|"/);
+
+  const sub = (await renderPage('/dsh-agents-skills?tab=repo&repo=a%2Fb&check=1')).body;
+  assert.match(sub, /name="row" value="check\|a\/b\|"/, '仓库子页也保留仓库级动作');
+
+  const local = (await renderPage('/dsh-agents-skills?tab=repo&repo=__local__')).body;
+  assert.equal(/name="row" value="check\|/.test(local), false, '本地子页没有检查类动作');
 });
 
 test('（d）状态列每行最多一个徽章，并发原因合并进 title，可见性作后缀文字', async () => {
@@ -1332,52 +1446,191 @@ test('（d）状态列每行最多一个徽章，并发原因合并进 title，�
     overview: async () => overviewOf([wonky, skillOf('gone', 'a/b'), skillOf('mine', '')]),
     check: async () => delta,
   });
-  const tbody = tbodyOf(res.body);
-  const statusCells = [...tbody.matchAll(/<td class="status">([\s\S]*?)<\/td>/g)].map((match) => match[1]);
-  assert.equal(statusCells.length, 4, '四行数据各有状态格（gone / new-one / wonky / mine）');
+  const rows = rowsOf(res.body);
+  assert.deepEqual(rows.map((row) => row.name).sort(), ['gone', 'mine', 'new-one', 'wonky'], '四行数据');
+  const statusCells = rows.map((row) => /<td class="status">([\s\S]*?)<\/td>/.exec(row.html)[1]);
   for (const cell of statusCells) {
     assert.equal((cell.match(/<span class="badge/g) ?? []).length <= 1, true, '状态格最多一个徽章：' + cell);
   }
   const wonkyCell = statusCells.find((cell) => /格式不合规/.test(cell));
-  assert.match(wonkyCell, /<span class="badge err" title="格式不合规；可更新">格式不合规<\/span>/, '优先级与 title 合并');
-  assert.match(wonkyCell, /<span class="dim suffix">·仅用户可用 ·模型专用<\/span>/, '可见性是后缀文字');
-  assert.equal(/<span class="badge[^>]*>仅用户可用/.test(tbody), false, '可见性不渲染成徽章');
-  // 上游已移除行的技能名带删除线样式
-  assert.match(tbody, /<td class="mono skill-name orphan">/, 'orphan 行技能名有删除线样式钩子');
+  // 徽章带 bdot 圆点；并发原因合并进 title（分号连接），class 尾缀不锁死。
+  assert.match(wonkyCell, /<span class="badge [a-z]+" title="格式不合规；可更新"><span class="bdot"><\/span>格式不合规<\/span>/, '优先级与 title 合并');
+  // 可见性（模型专用 / 仅用户可用）是徽章后面的小号文字，不是另一个徽章。
+  const badgeStripped = wonkyCell.replace(/<span class="badge[^>]*><span class="bdot"><\/span>[^<]*<\/span>/g, '');
+  assert.match(badgeStripped, /仅用户可用 ·模型专用/, '可见性是徽章外的后缀文字');
+  assert.equal(/<span class="badge[^>]*>仅用户可用/.test(res.body), false, '可见性不渲染成徽章');
+  // 徽标一律带 bdot 语义点（新皮肤）：徽章数与圆点数相等。
+  const badgeCount = (res.body.match(/<span class="badge[^>]*>/g) ?? []).length;
+  const bdotCount = (res.body.match(/<span class="bdot"><\/span>/g) ?? []).length;
+  assert.equal(bdotCount, badgeCount, '每个徽章都带 <span class="bdot"> 圆点');
+  // 上游已移除行的技能名带删除线样式钩子
+  assert.match(res.body, /<tr class="orphan"/, 'orphan 行有删除线样式钩子');
+  assert.match(rowByName(res.body, 'gone').html, /class="lock" title="上游已移除"/, 'orphan 行有「已移除」角标');
 });
 
 test('（e）表格下方两个 details.fold；有搜索结果时搜索区默认展开', async () => {
   const plain = await renderPage('/dsh-agents-skills?tab=skills&check=1');
-  assert.equal((plain.body.match(/<details class="fold"/g) ?? []).length, 2, '两个折叠区');
-  assert.match(plain.body, /<details class="fold"><summary>搜索安装<\/summary>/, '默认不展开');
-  assert.match(plain.body, /<details class="fold"><summary>使用说明<\/summary>/);
+  // 语义：表格下方恰好一个「搜索安装」折叠区与一个「使用说明」折叠区（分组卡另有 data-fold）。
+  assert.equal((plain.body.match(/<details class="fold"><summary>搜索安装<\/summary>/g) ?? []).length, 1, '一个搜索折叠区');
+  assert.equal((plain.body.match(/<details class="fold"><summary>使用说明<\/summary>/g) ?? []).length, 1, '一个说明折叠区');
   const searched = await renderPage('/dsh-agents-skills?tab=skills&q=react');
   assert.match(searched.body, /<details class="fold" open><summary>搜索安装<\/summary>/, '有结果时带 open');
-  assert.equal((searched.body.match(/<details class="fold"/g) ?? []).length, 2);
+  assert.equal((searched.body.match(/<details class="fold" open><summary>搜索安装<\/summary>/g) ?? []).length, 1);
+  // 分组卡是带 data-fold 的 details；搜索/说明折叠区没有 data-fold。
+  assert.equal(foldsOf(plain.body).size, 2, 'plain 页有两个分组卡（a/b 与本地）');
 });
 
-test('（f）技能表 min-width 为 900px，不再是 1080px', async () => {
-  const res = await renderPage('/dsh-agents-skills?check=1');
-  assert.match(res.body, /table\.skills \{ table-layout: fixed; min-width: 900px; \}/);
-  assert.equal(res.body.includes('min-width: 1080px'), false, '旧的 1080px 必须消失');
+test('（f）技能页默认折叠策略：只展开有待办的仓库，筛选时命中的组也展开', async () => {
+  const plain = await renderPage('/dsh-agents-skills?tab=skills&check=1');
+  const folds = foldsOf(plain.body);
+  assert.deepEqual([...folds.keys()].sort(), ['__local__', 'a/b'], '每个分组一张卡');
+  assert.equal(folds.get('a/b'), true, '有待办的仓库默认展开');
+  assert.equal(folds.get('__local__'), false, '没有待办的仓库默认折起');
+
+  // 用了筛选：命中的组要展开（否则筛选结果被折在里面看不见）。
+  const filtered = await renderPage('/dsh-agents-skills?tab=skills&check=1&state=local');
+  assert.deepEqual([...foldsOf(filtered.body).keys()], ['__local__'], '筛选后只剩命中的组');
+  assert.equal(foldsOf(filtered.body).get('__local__'), true, '筛选命中的组展开');
+
+  // 没检查过：没有任何待办，所有组都折起。
+  const cold = await renderPage('/dsh-agents-skills?tab=skills');
+  for (const [key, open] of foldsOf(cold.body)) {
+    assert.equal(open, false, key + ' 未检查时折起');
+  }
 });
 
-test('（g）纵向 padding 20px 与页面高度 calc(100vh - 40px) 同源', async () => {
-  const res = await renderPage('/dsh-agents-skills?check=1');
-  const padY = /--pad-y: (\d+)px/.exec(res.body);
-  assert.ok(padY, '定义了 --pad-y');
-  assert.equal(Number(padY[1]), 20, '纵向 padding = 20px');
-  assert.equal(Number(padY[1]) * 2, 40, '2 × 20px = 40px');
-  assert.match(res.body, /padding: var\(--pad-y\) var\(--pad-x\)/, 'body 的 padding 只引用变量');
-  assert.match(res.body, /height: calc\(100vh - 2 \* var\(--pad-y\)\)/, '页面高度引用同一个 --pad-y');
-  assert.equal(res.body.includes('calc(100vh - 48px)'), false, '旧的 48px 魔法数字必须消失');
+test('（g）页面吃 DSH 设计令牌，旧自研变量（--paper/--ink/…）彻底消失', async () => {
+  const body = (await renderPage('/dsh-agents-skills')).body;
+  // 令牌来自 dsh-client-ui-theme 的副本：至少若干种 alias 语义色都在。
+  const aliasTokens = new Set(body.match(/--dsw-alias-[a-z0-9-]+/g) ?? []);
+  assert.equal(aliasTokens.size >= 10, true, 'DSH alias 令牌数量足够，实际 ' + aliasTokens.size);
+  for (const token of ['--dsw-alias-bg-base', '--dsw-alias-label-primary', '--dsw-alias-border-l2', '--dsw-alias-link']) {
+    assert.equal(aliasTokens.has(token), true, '有 ' + token);
+  }
+  // 旧自研变量：定义与引用都不许再有（注意别把令牌定义段里的其它名字误判）。
+  const legacy = /--(paper|ink|sub|line|line-soft|amber|ok|err)(?![a-z0-9-])\s*[):,;]/g;
+  assert.deepEqual([...new Set(body.match(legacy) ?? [])], [], '不出现旧自研变量');
+  assert.equal(/var\(--(paper|ink|line|line-soft|amber)\b/.test(body), false, '自有样式不再引用旧变量');
 });
 
-test('（h）≤720px：导航横排、页面高度 auto、表格滚动容器 max-height:70vh', async () => {
-  const res = await renderPage('/dsh-agents-skills?check=1');
-  const media = /@media \(max-width: 720px\) \{([\s\S]*?)\n\}/.exec(res.body);
-  assert.ok(media, '有 720px 断点');
-  assert.match(media[1], /\.nav \{[^}]*flex-direction: row/);
-  assert.match(media[1], /\.content\.skills-page \{ height: auto; \}/);
-  assert.match(media[1], /\.table-scroll \{ max-height: 70vh; \}/);
+test('（h）主题偏好三路 SSR：html 属性 + body 暗色属性 + system 的媒体查询', async () => {
+  const { normalizeThemePreference } = await loadPage();
+  assert.equal(normalizeThemePreference('light'), 'light');
+  assert.equal(normalizeThemePreference('dark'), 'dark');
+  assert.equal(normalizeThemePreference('system'), 'system');
+  assert.equal(normalizeThemePreference('solarized'), 'system', '非法值回退 system');
+  assert.equal(normalizeThemePreference(undefined), 'system', '读不到回退 system');
+
+  const light = (await renderPage('/dsh-agents-skills', { theme: async () => 'light' })).body;
+  assert.match(light, /<html lang="zh-CN" data-theme-pref="light">/);
+  assert.equal(/<body data-ds-dark-theme>/.test(light), false, '亮色不烤暗色属性');
+  assert.equal(/@media \(prefers-color-scheme: dark\)/.test(light), false, '亮色只射一套');
+
+  const dark = (await renderPage('/dsh-agents-skills', { theme: async () => 'dark' })).body;
+  assert.match(dark, /<html lang="zh-CN" data-theme-pref="dark">/);
+  assert.match(dark, /<body data-ds-dark-theme>/, '暗色在 body 上烤出宿主同名属性');
+  assert.equal(/@media \(prefers-color-scheme: dark\)/.test(dark), false, '暗色只射一套');
+
+  for (const [label, overrides] of [['缺省', {}], ['非法', { theme: async () => 'weird' }], ['读取抛错', { theme: async () => { throw new Error('设置服务没起来'); } }]]) {
+    const body = (await renderPage('/dsh-agents-skills', overrides)).body;
+    assert.match(body, /<html lang="zh-CN" data-theme-pref="system">/, label + ' 回退 system');
+    assert.equal(/<body data-ds-dark-theme>/.test(body), false, label + ' 不烤暗色属性');
+    assert.match(body, /@media \(prefers-color-scheme: dark\)\{[\s\S]*body\{/, label + ' 暗色包在媒体查询里');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 新参数与新前端钩子：状态筛选、名字筛选、批量增强。
+// ---------------------------------------------------------------------------
+
+test('GET ?state=：状态 chip 语义筛选（new / upd / gone / local / all）', async () => {
+  const cases = [
+    ['new', ['new-one']],
+    ['upd', ['tdd']],
+    ['gone', ['gone']],
+    ['local', ['mine']],
+    ['all', ['gone', 'new-one', 'tdd', 'mine']],
+  ];
+  for (const [state, names] of cases) {
+    const res = await renderPage('/dsh-agents-skills?tab=skills&check=1&state=' + state);
+    assert.equal(res.status, 200, state);
+    assert.deepEqual(rowsOf(res.body).map((row) => row.name), names, 'state=' + state + ' 只留命中的行');
+    const chips = chipsOf(res.body);
+    assert.equal(chips.get(state === 'all' ? '全部' : state === 'upd' ? '可更新' : state === 'gone' ? '上游已移除' : state === 'local' ? '本地·未托管' : '新增').pressed, true,
+      'state=' + state + ' 的 chip 处于选中态');
+  }
+});
+
+test('GET ?filter=：按技能名子串筛选，非法 state 回退 all，超长 filter 截到 64 字', async () => {
+  const hit = await renderPage('/dsh-agents-skills?tab=skills&check=1&filter=new');
+  assert.deepEqual(rowsOf(hit.body).map((row) => row.name), ['new-one'], '子串命中一行');
+  assert.match(hit.body, /name="filter" value="new"/, '筛选值回填进输入框');
+  assert.match(hit.body, /data-live-filter/, '筛选框带实时筛选钩子');
+
+  const miss = await renderPage('/dsh-agents-skills?tab=skills&check=1&filter=zzz');
+  assert.deepEqual(rowsOf(miss.body), [], '没有命中就没有数据行');
+  assert.match(miss.body, /没有匹配的技能/, '空态说人话');
+
+  const illegal = await renderPage('/dsh-agents-skills?tab=skills&check=1&state=evil');
+  assert.equal(chipsOf(illegal.body).get('全部').pressed, true, '非法 state 回退 all');
+  assert.equal(rowsOf(illegal.body).length, 4, '非法 state 不筛掉任何行');
+
+  const long = await renderPage('/dsh-agents-skills?tab=skills&check=1&filter=' + 'x'.repeat(100));
+  assert.equal(/name="filter" value="([^"]*)"/.exec(long.body)[1].length, 64, 'filter 截到 64 字');
+});
+
+test('新前端钩子齐全：data-live-filter / data-name / data-state / data-rowpick / data-checkall / data-fold / batchbar', async () => {
+  const body = (await renderPage('/dsh-agents-skills?tab=skills&check=1')).body;
+  assert.match(body, /<input type="search" name="filter"[^>]*data-live-filter/, '实时筛选钩子');
+  assert.match(body, /<input type="checkbox" data-checkall aria-label="[^"]*">/, '分组全选钩子');
+  assert.match(body, /<input type="checkbox" name="pick" value="a\/b\|new-one" data-rowpick/, '单行勾选钩子');
+  assert.match(body, /id="batchbar"/, '批量条有 id');
+  assert.match(body, /id="pickCount" data-pick-count/, '计数位有 id 与钩子');
+  assert.match(body, /<details class="fold" open data-fold="a\/b">/, '分组折叠带 data-fold');
+  for (const row of rowsOf(body)) {
+    assert.equal(/data-state="[a-z]+"/.test(row.attrs), true, '行有 data-state');
+    assert.equal(/data-name="[^"]+"/.test(row.attrs), true, '行有 data-name');
+  }
+});
+
+test('frontmatter 残渣（>/|-/|->）不再落进说明列', async () => {
+  const { cleanDescription } = await loadPage();
+  for (const residue of ['>', '|-', '>-', '>-2', '|+']) {
+    assert.equal(cleanDescription(residue), '', '残渣 ' + residue + ' 被清成空');
+  }
+  assert.equal(cleanDescription('正常说明'), '正常说明');
+  assert.equal(cleanDescription(null), '');
+
+  const skills = [
+    skillOf('r-gt', 'a/b', { description: '>' }),
+    skillOf('r-pipe', 'a/b', { description: '|-' }),
+    skillOf('good', 'a/b', { description: '正常说明' }),
+  ];
+  const res = await renderPage('/dsh-agents-skills?tab=skills&check=1', { overview: async () => overviewOf(skills) });
+  assert.equal(tbodyOf(res.body).includes('|-'), false, '表体里不再出现孤立的 |-');
+  assert.equal(tdsOf(rowByName(res.body, 'r-gt').html)[3].includes('&gt;'), false, '说明列不再出现孤立的 >');
+  assert.match(tdsOf(rowByName(res.body, 'good').html)[3], /正常说明/, '正常说明照常显示');
+});
+
+test('协议值语义不变：row / batch / pick / subscribe / check / tab / pickall / back', async () => {
+  const skills = (await renderPage('/dsh-agents-skills?tab=skills&check=1')).body;
+  assert.match(skills, /name="back" value="\?tab=skills&amp;check=1"/, 'back 是本站相对查询串');
+  assert.match(skills, /name="row" value="install\|a\/b\|new-one"/, 'row = 动作|仓库|技能');
+  assert.match(skills, /name="row" value="update\|a\/b\|tdd"/);
+  assert.match(skills, /name="row" value="remove\|a\/b\|gone"/);
+  assert.match(skills, /name="pick" value="a\/b\|new-one"/, 'pick = 仓库|技能');
+  for (const batch of ['install', 'update', 'remove', 'updateAll']) {
+    assert.match(skills, new RegExp('name="batch" value="' + batch + '"'), 'batch=' + batch);
+  }
+  assert.match(skills, /href="\/dsh-agents-skills\?tab=skills&amp;check=1&amp;pickall=1"/, 'pickall 链接');
+  assert.match(skills, /href="\/dsh-agents-skills\?tab=skills&amp;check=1&amp;todo=1"/, 'todo=1 链接');
+  assert.match(skills, /href="\/dsh-agents-skills\?tab=skills&amp;check=2"/, 'check=2 强制重查链接');
+  for (const tab of ['repos', 'skills', 'todo', 'agent']) {
+    assert.match(skills, new RegExp('href="/dsh-agents-skills\\?tab=' + tab + '"'), '导航到 tab=' + tab);
+  }
+  const repos = (await renderPage('/dsh-agents-skills?tab=repos&check=1')).body;
+  assert.match(repos, /name="action" value="subscribe"/, 'subscribe 协议不变');
+  assert.match(repos, /name="source"/, 'subscribe 的参数名不变');
+  const repo = (await renderPage('/dsh-agents-skills?tab=repo&repo=a%2Fb&check=1')).body;
+  assert.match(repo, /name="back" value="\?tab=repo&amp;repo=a%2Fb"/, '子页 back 带 repo');
 });

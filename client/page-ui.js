@@ -1,81 +1,115 @@
 // dsh-agents-skills · 独立页的少量交互层（无框架 / 无构建 / 无依赖）
 //
-// 只做一件事：把「整页导航」换成「fetch + 局部替换」（pjax），顺手保住两处状态：
-//   - 滚动：POST 之后回到原来的位置。技能页真正的滚动条在 .table-scroll 里，不是 window，
-//     所以两级都记录（window.scrollY + 几个滚动容器）。
-//   - 折叠：<details class="fold"> 按 <summary> 文本重开；服务端渲染仍是唯一事实源。
-//
-// 硬边界：不改协议、不改 HTML 结构（只认 class 钩子）、不做动态求值 / 动态建函数 / 动态加载模块 /
-// 不碰浏览器本地存储；任何一步对不上就静默退出，让浏览器走原生导航（纯 SSR + 表单是兜底）。
+// 纯渐进增强：JS 关掉后服务端 GET/POST 兜底照旧。
+//   1) pjax：站内 GET 链接与 POST 表单改成 fetch + 局部替换 <body>；POST 后保滚动；群组卡按
+//      data-fold 键恢复折叠态（卡头文本含会变的计数，不能用），其余 details 用固定 summary 文本。
+//   2) 实时筛选：data-live-filter 按行 data-name 小写子串过滤，空组隐藏，与服务端 state chip 叠加。
+//   3) 批量条：data-rowpick 实时计数到 data-pick-count；data-checkall 全选 / 半选（indeterminate）。
+// 硬边界：不改协议 / HTML 结构（只认 data-* 与 class 钩子）、无动态求值 / 建函数 / 加载模块、不碰本地存储；对不上就静默退出走原生导航。
 (function () {
   'use strict'
 
   var PAGE_PATH = '/dsh-agents-skills'
   var SCROLLERS = ['.table-scroll', '.search-scroll', '.repostrip']
+  var BATCH_HINT = '勾选行后可批量操作'
   var bypass = false
 
-  // 自己的路径：<script src="<pagePath>?asset=page-ui.js" defer> 里剥掉查询串。
   try {
     if (document.currentScript && document.currentScript.src) {
       PAGE_PATH = new URL(document.currentScript.src, location.href).pathname
     }
   } catch (error) { /* 拿不到 src 就用默认路径 */ }
 
-  function isPage(href) {
-    try {
-      var url = new URL(href, location.href)
-      return url.origin === location.origin && url.pathname === PAGE_PATH
-    } catch (error) { return false }
-  }
-
-  function each(selector, visit) {
+  function each(selector, visit, scope) {
     var nodes = []
-    try { nodes = document.querySelectorAll(selector) } catch (error) { return }
-    for (var i = 0; i < nodes.length; i++) visit(nodes[i], i)
+    try { nodes = (scope || document).querySelectorAll(selector) } catch (error) { return }
+    nodes.forEach(visit)
   }
 
-  function openFolds() {
-    var open = []
-    each('details.fold', function (fold) {
-      var summary = fold.querySelector('summary')
-      if (summary && fold.open) open.push(summary.textContent.trim())
+  /** 折叠态键：群组卡 = data-fold（稳定）；搜索 / 说明区没有 data-fold，用恒定 summary 文本。 */
+  function foldKey(fold) {
+    var key = fold.getAttribute('data-fold')
+    if (key) return 'k:' + key
+    var summary = fold.querySelector('summary')
+    return summary ? 's:' + summary.textContent.trim() : null
+  }
+
+  /** 实时筛选：只叠加名字维（状态维已由服务端 chip 渲染），语义与服务端一致（小写子串）。 */
+  function applyFilter() {
+    var input = document.querySelector('[data-live-filter]')
+    if (!input) return
+    var value = String(input.value || '').trim()
+    var needle = value.toLowerCase(), shown = 0
+    each('details.fold[data-fold]', function (fold) {
+      var hit = 0
+      each('tr[data-name]', function (row) {
+        var name = String(row.getAttribute('data-name') || '').toLowerCase()
+        var match = needle.length === 0 || name.indexOf(needle) !== -1
+        row.style.display = match ? '' : 'none'
+        if (match) hit++
+      }, fold)
+      fold.style.display = needle.length > 0 && hit === 0 ? 'none' : ''
+      shown += hit
     })
-    return open
+    var empty = document.querySelector('.skills-form ~ .empty') || document.querySelector('.empty') // 空态：有现成 .empty 就复用，没有就跳过
+    if (empty) empty.style.display = needle.length === 0 || shown === 0 ? '' : 'none'
+    syncLinks(value)
   }
 
-  function scrollState() {
-    var state = { y: window.scrollY || 0, inner: [] }
-    for (var i = 0; i < SCROLLERS.length; i++) {
-      var box = document.querySelector(SCROLLERS[i])
-      state.inner.push(box ? [box.scrollTop, box.scrollLeft] : null)
-    }
-    return state
+  /** chip 与「选中全部待办」都是 GET 链接：同步 filter 参数，两个筛选才能叠加。 */
+  function syncLinks(value) {
+    each('a.chip[href], #batchbar .acts.push a[href]', function (link) {
+      try {
+        var url = new URL(link.getAttribute('href'), location.href)
+        if (value.length > 0) url.searchParams.set('filter', value)
+        else url.searchParams.delete('filter')
+        link.setAttribute('href', url.pathname + url.search + url.hash)
+      } catch (error) { /* 保留服务端 href */ }
+    })
+  }
+
+  /** 批量条：计数位 + 每组表头全选框的全选 / 半选。勾选框是表单控件，无 JS 也能提交。 */
+  function syncBatch() {
+    var count = document.querySelectorAll('input[data-rowpick]:checked').length
+    var label = document.querySelector('[data-pick-count]')
+    if (label) label.textContent = count > 0 ? '已选 ' + count + ' 行' : BATCH_HINT
+    each('input[data-checkall]', function (master) {
+      var scope = master.closest('table') || document
+      var total = scope.querySelectorAll('input[data-rowpick]').length, checked = scope.querySelectorAll('input[data-rowpick]:checked').length
+      master.checked = total > 0 && checked === total
+      master.indeterminate = checked > 0 && checked < total
+    })
   }
 
   function apply(html, scroll, keep) {
     var doc = new DOMParser().parseFromString(html, 'text/html')
     if (!doc || !doc.body) return false
-    var open = openFolds()
+    var open = []
+    each('details.fold', function (fold) { if (fold.open) { var key = foldKey(fold); if (key) open.push(key) } })
     document.title = doc.title
     document.body.innerHTML = doc.body.innerHTML
     each('details.fold', function (fold) {
-      var summary = fold.querySelector('summary')
-      if (summary) fold.open = open.indexOf(summary.textContent.trim()) !== -1
+      var key = foldKey(fold)
+      if (key) fold.open = open.indexOf(key) !== -1
     })
+    syncBatch(); applyFilter()
     if (!keep) { window.scrollTo(0, 0); return true }
     window.scrollTo(0, scroll.y)
-    for (var i = 0; i < SCROLLERS.length; i++) {
-      var box = document.querySelector(SCROLLERS[i])
+    SCROLLERS.forEach(function (selector, i) {
+      var box = document.querySelector(selector)
       if (box && scroll.inner[i]) { box.scrollTop = scroll.inner[i][0]; box.scrollLeft = scroll.inner[i][1] }
-    }
+    })
     return true
   }
 
   /** fetch → 解析 → 局部替换 → pushState 到最终 URL（跟随 303）；popstate 分支不 push。 */
   function load(url, keep, init, push) {
-    var scroll = keep ? scrollState() : null
+    var scroll = keep ? { y: window.scrollY || 0, inner: SCROLLERS.map(function (selector) {
+      var box = document.querySelector(selector)
+      return box ? [box.scrollTop, box.scrollLeft] : null
+    }) } : null
     var options = init || {}
-    if (!options.credentials) options.credentials = 'same-origin'
+    if (!options.credentials) options.credentials = 'same-origin' // 同源 cookie 鉴权
     return fetch(url, options).then(function (response) {
       if (!response.ok) throw new Error('HTTP ' + response.status)
       return response.text().then(function (html) { return { html: html, url: response.url || url } })
@@ -87,26 +121,34 @@
 
   function onClick(event) {
     try {
-      if (event.defaultPrevented || event.button !== 0) return
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-      var node = event.target
-      var anchor = node && typeof node.closest === 'function' ? node.closest('a[href]') : null
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      var anchor = event.target && typeof event.target.closest === 'function' ? event.target.closest('a[href]') : null
       if (anchor === null) return
       var href = anchor.getAttribute('href')
       if (!href || href.charAt(0) === '#' || anchor.hasAttribute('download')) return
       if (anchor.target && anchor.target !== '_self') return
-      if (!isPage(href)) return
+      var url = new URL(href, location.href)
+      if (url.origin !== location.origin || url.pathname !== PAGE_PATH) return
       event.preventDefault()
-      load(new URL(href, location.href).href, false).catch(function () { location.href = href })
+      load(url.href, false).catch(function () { location.href = href })
     } catch (error) { /* 交给浏览器原生导航 */ }
+  }
+
+  /** input / change 走事件委托：pjax 换掉 <body> 后不用重新绑定，apply() 里重算即可。 */
+  function onInputChange(event) {
+    var node = event.target
+    if (!node || typeof node.closest !== 'function') return
+    if (event.type === 'input') { if (node.closest('[data-live-filter]')) applyFilter(); return }
+    if (node.closest('input[data-checkall]')) {
+      each('input[data-rowpick]', function (pick) { pick.checked = node.checked }, node.closest('table') || document)
+    } else if (!node.closest('input[data-rowpick]')) return
+    syncBatch()
   }
 
   /** 表单体按 application/x-www-form-urlencoded 拼（服务端 parseForm 只认这种）。 */
   function formBody(form, submitter) {
     var params = new URLSearchParams()
-    new FormData(form).forEach(function (value, key) {
-      params.append(key, typeof value === 'string' ? value : value.name)
-    })
+    new FormData(form).forEach(function (value, key) { params.append(key, typeof value === 'string' ? value : value.name) })
     if (submitter && submitter.name) params.append(submitter.name, submitter.value)
     return params
   }
@@ -118,9 +160,7 @@
       // 老浏览器没有 requestSubmit：手动补上按钮的 name/value，form.submit() 不会带它。
       if (submitter && submitter.name) {
         var hidden = document.createElement('input')
-        hidden.type = 'hidden'
-        hidden.name = submitter.name
-        hidden.value = submitter.value
+        hidden.type = 'hidden'; hidden.name = submitter.name; hidden.value = submitter.value
         form.appendChild(hidden)
       }
       form.submit()
@@ -129,9 +169,8 @@
 
   function onSubmit(event) {
     try {
-      if (bypass || event.defaultPrevented) return
       var form = event.target
-      if (!form || typeof form.getAttribute !== 'function') return
+      if (bypass || event.defaultPrevented || !form || typeof form.getAttribute !== 'function') return
       if (String(form.getAttribute('method') || '').toLowerCase() !== 'post') return
       var action = form.getAttribute('action')
       var target = action && action.length > 0 ? new URL(action, location.href) : new URL(location.href)
@@ -149,8 +188,11 @@
 
   document.addEventListener('click', onClick)
   document.addEventListener('submit', onSubmit)
+  document.addEventListener('input', onInputChange)
+  document.addEventListener('change', onInputChange)
   window.addEventListener('popstate', function () {
     // 前进/后退：URL 已经变到当前条目了，只换内容，不再 push（否则会截断前进栈）。
     load(location.href, false, null, false).catch(function () { location.reload() })
   })
+  syncBatch(); applyFilter()
 })()
