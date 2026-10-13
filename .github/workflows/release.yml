@@ -58,6 +58,21 @@ jobs:
 
           也可用 scoped 名：`@cowwo/dsh-agents-skills`。
 
+          ## 本版重点：独立页 `/dsh-agents-skills` 视觉与交互重构
+
+          - **配色改吃 DSH 设计令牌**：独立页颜色、圆角、字体全部引用宿主 `--dsw-alias-*` /
+            `--dsw-radius-*` / `--dsw-font-family`，页面里不再自写色值；宿主换主题时这页跟着变
+          - **亮暗跟随 DSH 设置**：不再只看操作系统深浅色。服务端渲染时读宿主 `ui-theme` 偏好，
+            按 light / dark / system 三路输出；「跟随系统」仍交给浏览器媒体查询
+          - **交互更顺手**：顶部工具条（状态筛选 chip + 按名字实时筛选）、默认只展开有待办的仓库、
+            勾选任意行浮出批量条并显示计数、表头全选/半选、空态文案、提交按钮「处理中」反馈
+          - **修复**：技能「说明」列曾把 frontmatter 残渣（`>` / `|-`）显示成正文，现显示为空
+          - **新增工具**：`scripts/refresh-dsh-tokens.mjs`，DSH 升级后一键刷新页内令牌副本
+          - **测试重写**：`test/page.test.mjs` 由逐字字符串断言改为语义断言，调样式不再误报，
+            但改坏转义/脚本策略会立刻报红（现 110 项测试全绿）
+
+          ## 全局 Agent 提示词
+
           - 在「设置 → 全局 Agent」里查看并实时编辑 `$DSH_HOME/AGENTS.md`（全局提示词）
           - 保存为整文件替换：覆盖前旧内容自动备份到同目录的 `AGENTS.md.bak`
           - 同时暴露 `globalAgent/read`、`globalAgent/write` 两个 Remote 端点，界面与 Agent 共用同一条代码路径
