@@ -1,6 +1,6 @@
 {
   "name": "dsh-agents-skills",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Agent 与技能管理台：Agents&Skills 页两个标签——全局 Agent 提示词 $DSH_HOME/AGENTS.md 的查看与实时编辑；用户级技能（$DSH_AGENTS_HOME/skills）的列表、来源仓库新增/更新检测、装删更新（转交 npx skills）。",
   "type": "module",
   "main": "lib/index.js",
